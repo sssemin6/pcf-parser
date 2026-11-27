@@ -143,20 +143,34 @@ def clear_skip(db: sqlite3.Connection, path: Path) -> None:
 
 
 def search(db: sqlite3.Connection, query: str, limit: int) -> list[dict]:
-    matches = db.execute("""
-        SELECT t.thread_id, t.comment_no, t.source, t.raw_status, d.file_path, d.plan_title, d.hull_no
-        FROM pcf_threads_fts
-        JOIN pcf_threads AS t ON t.thread_id = pcf_threads_fts.rowid
-        JOIN pcf_documents AS d ON d.doc_id = t.doc_id
-        WHERE pcf_threads_fts MATCH ? ORDER BY rank, t.thread_id LIMIT ?
-    """, (query, limit)).fetchall()
-    results = []
-    for match in matches:
-        turns = []
-        for row in db.execute("""
-            SELECT turn_order, round_label, buyer_comment, builder_reply, has_image, attachments
-            FROM pcf_turns WHERE thread_id = ? ORDER BY turn_order
-        """, (match["thread_id"],)):
-            turns.append({**dict(row), "attachments": json.loads(row["attachments"]), "has_image": bool(row["has_image"])})
-        results.append({**dict(match), "turns": turns})
-    return results
+    rows = db.execute("""
+        WITH matches AS (
+            SELECT rowid AS thread_id, rank AS score
+            FROM pcf_threads_fts WHERE pcf_threads_fts MATCH ?
+            ORDER BY score, thread_id LIMIT ?
+        )
+        SELECT t.thread_id, t.comment_no, t.source, t.raw_status, d.file_path, d.plan_title, d.hull_no,
+               v.turn_order, v.round_label, v.buyer_comment, v.builder_reply, v.has_image, v.attachments
+        FROM matches
+        JOIN pcf_threads AS t USING (thread_id)
+        JOIN pcf_documents AS d USING (doc_id)
+        JOIN pcf_turns AS v ON v.thread_id = t.thread_id
+        ORDER BY matches.score, t.thread_id, v.turn_order
+    """, (query, limit))
+    results: dict[int, dict] = {}
+    thread_fields = ("thread_id", "comment_no", "source", "raw_status", "file_path", "plan_title", "hull_no")
+    for row in rows:
+        thread_id = row["thread_id"]
+        if thread_id not in results:
+            results[thread_id] = {key: row[key] for key in thread_fields}
+            results[thread_id]["turns"] = []
+        turns = results[thread_id]["turns"]
+        turns.append({
+            "turn_order": row["turn_order"],
+            "round_label": row["round_label"],
+            "buyer_comment": row["buyer_comment"],
+            "builder_reply": row["builder_reply"],
+            "has_image": bool(row["has_image"]),
+            "attachments": json.loads(row["attachments"]),
+        })
+    return list(results.values())
