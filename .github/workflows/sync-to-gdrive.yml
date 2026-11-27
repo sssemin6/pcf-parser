@@ -1,0 +1,52 @@
+name: Preview Google Drive Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      folder_id:
+        description: Google Drive destination folder ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Drive configuration
+        env:
+          GDRIVE_FOLDER_ID: ${{ inputs.folder_id }}
+          RCLONE_CONFIG_CONTENT: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          if [[ ! "$GDRIVE_FOLDER_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
+            echo "::error::Enter the destination folder ID from the Google Drive folder link."
+            exit 1
+          fi
+          if [[ -z "$RCLONE_CONFIG_CONTENT" ]]; then
+            echo "::error::Set the RCLONE_CONFIG repository secret before syncing to Google Drive."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install rclone
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rclone
+
+      - name: Preview file sync without writing to Drive
+        env:
+          GDRIVE_FOLDER_ID: ${{ inputs.folder_id }}
+          RCLONE_CONFIG_CONTENT: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          umask 077
+          config="$(mktemp "$RUNNER_TEMP/pcf-rclone.XXXXXX")"
+          trap 'rm -f -- "$config"' EXIT
+          printf '%s\n' "$RCLONE_CONFIG_CONTENT" > "$config"
+          rclone sync . gdrive: --config "$config" --dry-run \
+            --drive-root-folder-id "$GDRIVE_FOLDER_ID" \
+            --exclude '/.git/**' --exclude '/rclone.conf' -v
