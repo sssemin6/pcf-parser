@@ -3,6 +3,8 @@ __pycache__/
 build/
 dist/
 .venv/
+/pcf-source.txt
+/pcf-runtime/
 *.sqlite
 *.sqlite-*
 *.sqlite3

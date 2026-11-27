@@ -4,6 +4,14 @@ Plan Comments Form의 Excel·Word 파일을 읽어 문서 → 코멘트 스레�
 
 ## 설치와 실행
 
+### Windows에서 더블클릭 실행
+
+Windows용 ZIP은 압축을 푼 폴더에서 `run-pcf.cmd`를 더블클릭하면 실행됩니다. GitHub 소스에서 실행하는 경우에는 Python 3.10 이상을 설치하고 프로젝트 폴더에서 `py -3 -m pip install .`을 한 번 실행하세요.
+
+`run-pcf.cmd` 옆에 `pcf-source.txt`를 만들고 PCF 입력 폴더의 경로를 UTF-8로 한 줄에 적으면 기본 경로로 사용합니다. 로컬 경로와 `\\server\share\folder` 형식의 UNC 경로를 지원합니다. 실행 후 1번은 적재, 2번은 검색, 3번은 입력 폴더 변경입니다. 검색 DB는 `%LOCALAPPDATA%\PCF Parser\pcf.sqlite3`에 저장됩니다. PowerShell에서 `.\run-pcf.cmd --self-test`로 런타임을 점검할 수 있습니다.
+
+### 명령줄에서 실행
+
 Python 3.10 이상과 FTS5가 활성화된 SQLite가 필요합니다. 구형 `.xls`·`.doc` 변환에는 LibreOffice를 설치하고 `libreoffice` 또는 `soffice`를 PATH에서 실행할 수 있어야 합니다.
 구형 파일은 변환 과정에서 표 구조가 손실될 수 있습니다. 이 경우 파싱 리포트에 실패 파일로 표시됩니다.
 
