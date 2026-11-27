@@ -1,8 +1,9 @@
 import json
 from pathlib import Path
+import re
 import sqlite3
 
-from .models import Document
+from .models import METADATA_FIELDS, Document
 from .parser import search_text
 
 
@@ -26,7 +27,8 @@ CREATE TABLE IF NOT EXISTS pcf_threads (
     doc_id INTEGER NOT NULL REFERENCES pcf_documents(doc_id) ON DELETE CASCADE,
     comment_no TEXT NOT NULL,
     source TEXT NOT NULL,
-    initial TEXT,
+    initial_comment TEXT,
+    reviewer_initial TEXT,
     raw_status TEXT,
     inferred_status TEXT NOT NULL DEFAULT 'Unknown',
     issue_summary TEXT,
@@ -75,7 +77,12 @@ CREATE TABLE IF NOT EXISTS skipped_files (
 );
 """
 
-_FIELDS = ("hull_no", "ship_type", "plan_title", "plan_no", "comment_party", "approval_status")
+_HYPHEN_TERM = re.compile(r"\w+(?:-\w+)+")
+_QUERY_TERM = re.compile(r'"(?:[^"]|"")*"|\w+(?:-\w+)+')
+
+
+def _thread_columns(db: sqlite3.Connection) -> set[str]:
+    return {row["name"] for row in db.execute("PRAGMA table_info(pcf_threads)")}
 
 
 def connect(path: Path, *, create: bool = True) -> sqlite3.Connection:
@@ -86,6 +93,13 @@ def connect(path: Path, *, create: bool = True) -> sqlite3.Connection:
         db.execute("PRAGMA foreign_keys = ON")
         if create:
             db.executescript(_SCHEMA)
+            with db:
+                db.execute("BEGIN IMMEDIATE")
+                columns = _thread_columns(db)
+                if "initial" in columns and "initial_comment" not in columns:
+                    db.execute("ALTER TABLE pcf_threads RENAME COLUMN initial TO initial_comment")
+                if "reviewer_initial" not in columns:
+                    db.execute("ALTER TABLE pcf_threads ADD COLUMN reviewer_initial TEXT")
     except Exception:
         db.close()
         raise
@@ -98,10 +112,11 @@ def is_current(db: sqlite3.Connection, path: Path, file_hash: str) -> bool:
     ).fetchone() is not None
 
 
-def save(db: sqlite3.Connection, path: Path, file_hash: str, file_type: str, document: Document) -> bool:
+def save(db: sqlite3.Connection, path: Path, file_hash: str, file_type: str, document: Document, *,
+         force: bool = False) -> bool:
     with db:
         db.execute("BEGIN IMMEDIATE")
-        if is_current(db, path, file_hash):
+        if not force and is_current(db, path, file_hash):
             return False
         db.execute("""
             INSERT INTO pcf_documents (file_path, file_hash, file_type, hull_no, ship_type,
@@ -111,15 +126,16 @@ def save(db: sqlite3.Connection, path: Path, file_hash: str, file_type: str, doc
                 hull_no = excluded.hull_no, ship_type = excluded.ship_type, plan_title = excluded.plan_title,
                 plan_no = excluded.plan_no, comment_party = excluded.comment_party,
                 approval_status = excluded.approval_status, parse_method = 'rule', parsed_at = CURRENT_TIMESTAMP
-        """, (str(path), file_hash, file_type, *(document.metadata.get(key) for key in _FIELDS)))
+        """, (str(path), file_hash, file_type, *(document.metadata.get(key) for key in METADATA_FIELDS)))
         doc_id = db.execute("SELECT doc_id FROM pcf_documents WHERE file_path = ?", (str(path),)).fetchone()[0]
         db.execute("DELETE FROM pcf_threads WHERE doc_id = ?", (doc_id,))
         for thread in document.threads:
             initial = next((turn.buyer_comment for turn in thread.turns if turn.buyer_comment), None)
             cursor = db.execute("""
-                INSERT INTO pcf_threads (doc_id, comment_no, source, initial, raw_status, search_text)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (doc_id, thread.comment_no, thread.source, initial, thread.raw_status or None, search_text(thread)))
+                INSERT INTO pcf_threads (doc_id, comment_no, source, initial_comment, reviewer_initial, raw_status, search_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (doc_id, thread.comment_no, thread.source, initial, thread.reviewer_initial or None,
+                  thread.raw_status or None, search_text(thread)))
             db.executemany("""
                 INSERT INTO pcf_turns (thread_id, turn_order, round_label, buyer_comment, builder_reply, has_image, attachments)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -142,23 +158,50 @@ def clear_skip(db: sqlite3.Connection, path: Path) -> None:
     db.execute("DELETE FROM skipped_files WHERE file_path = ?", (str(path),))
 
 
+def _quote(term: str) -> str:
+    return '"' + term.replace('"', '""') + '"'
+
+
 def search(db: sqlite3.Connection, query: str, limit: int) -> list[dict]:
-    rows = db.execute("""
-        WITH matches AS (
+    query = query.strip()
+    fts_query = _QUERY_TERM.sub(lambda match: match[0] if match[0].startswith('"') else _quote(match[0]), query)
+    identifier = query.strip('"').lower()
+    if not _HYPHEN_TERM.fullmatch(identifier):
+        identifier = None
+    columns = _thread_columns(db)
+    initial = "t.initial_comment" if "initial_comment" in columns else "t.initial"
+    reviewer = "t.reviewer_initial" if "reviewer_initial" in columns else "NULL"
+    sql = f"""
+        WITH candidates AS (
             SELECT rowid AS thread_id, rank AS score
             FROM pcf_threads_fts WHERE pcf_threads_fts MATCH ?
+            UNION ALL
+            SELECT c.thread_id, -1000.0 AS score
+            FROM pcf_threads AS c JOIN pcf_documents AS doc USING (doc_id)
+            WHERE ? IN (lower(c.comment_no), lower(doc.hull_no), lower(doc.plan_no))
+        ),
+        matches AS (
+            SELECT thread_id, min(score) AS score FROM candidates GROUP BY thread_id
             ORDER BY score, thread_id LIMIT ?
         )
-        SELECT t.thread_id, t.comment_no, t.source, t.raw_status, d.file_path, d.plan_title, d.hull_no,
+        SELECT t.thread_id, t.comment_no, t.source, t.raw_status, d.file_path, d.plan_title, d.hull_no, d.plan_no,
+               {initial} AS initial_comment, {reviewer} AS reviewer_initial,
                v.turn_order, v.round_label, v.buyer_comment, v.builder_reply, v.has_image, v.attachments
         FROM matches
         JOIN pcf_threads AS t USING (thread_id)
         JOIN pcf_documents AS d USING (doc_id)
         JOIN pcf_turns AS v ON v.thread_id = t.thread_id
         ORDER BY matches.score, t.thread_id, v.turn_order
-    """, (query, limit))
+    """
+    try:
+        rows = db.execute(sql, (fts_query, identifier, limit))
+    except sqlite3.OperationalError as exc:
+        if not str(exc).startswith(("fts5: syntax error", "no such column:", "unterminated string")):
+            raise
+        rows = db.execute(sql, (_quote(query), identifier, limit))
     results: dict[int, dict] = {}
-    thread_fields = ("thread_id", "comment_no", "source", "raw_status", "file_path", "plan_title", "hull_no")
+    thread_fields = ("thread_id", "comment_no", "source", "raw_status", "file_path", "plan_title", "hull_no", "plan_no",
+                     "initial_comment", "reviewer_initial")
     for row in rows:
         thread_id = row["thread_id"]
         if thread_id not in results:

@@ -22,11 +22,12 @@ def run_menu(pcf_main) -> int:
 
     while True:
         print(f"\nPCF Parser\n입력 폴더: {source or '미설정'}\nSQLite: {database}\n")
-        print("1. PCF 파일 적재 또는 갱신\n2. 코멘트 검색\n3. 입력 폴더 변경\n0. 종료")
+        print("1. PCF 파일 적재 또는 갱신\n2. 코멘트 검색\n3. 입력 폴더 변경\n"
+              "4. JSON 추출 및 LLM 자동 검토(FB 생성)\n0. 종료")
         choice = input("선택 [Enter = 1]: ").strip()
         if choice == "0":
             return 0
-        if choice == "3" or (choice in {"", "1"} and not source):
+        if choice == "3" or (choice in {"", "1", "4"} and not source):
             selected = input("입력 폴더 경로: ").strip().strip('"')
             if selected:
                 source = selected
@@ -39,7 +40,7 @@ def run_menu(pcf_main) -> int:
             if not query:
                 continue
             args = ["search", query, "--db", str(database)]
-        elif choice in {"", "1"}:
+        elif choice in {"", "1", "4"}:
             try:
                 if not Path(source).is_dir():
                     print("입력 폴더를 찾을 수 없습니다. 경로와 공유 폴더 연결을 확인하세요.")
@@ -47,14 +48,22 @@ def run_menu(pcf_main) -> int:
             except OSError as exc:
                 print(f"입력 폴더에 접근할 수 없습니다. {exc}")
                 continue
-            args = ["ingest", source, "--db", str(database)]
+            if choice == "4":
+                default_output = local_data / "review"
+                output = input(f"작업 폴더 [Enter = {default_output}]: ").strip().strip('"')
+                force = input("변경되지 않은 파일도 다시 파싱할까요? [y/N]: ").strip().lower()
+                args = ["pipeline", source, "--out", output or str(default_output)]
+                if force == "y":
+                    args.append("--force")
+            else:
+                args = ["ingest", source, "--db", str(database)]
         else:
-            print("0~3 중에서 선택하세요.")
+            print("0~4 중에서 선택하세요.")
             continue
 
         try:
             if pcf_main(args):
-                print("일부 파일을 처리하지 못했습니다. 위 결과의 failed 항목을 확인하세요.")
+                print("일부 파일을 처리하지 못했습니다. 파싱 요약 또는 피드백 리포트의 오류를 확인하세요.")
         except SystemExit as exc:
             if exc.code:
                 print("위 오류 메시지를 확인하세요.")

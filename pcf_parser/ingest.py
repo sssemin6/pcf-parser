@@ -98,7 +98,7 @@ def _modern_file(path: Path):
         yield converted
 
 
-def ingest(db: sqlite3.Connection, root: Path) -> Report:
+def ingest(db: sqlite3.Connection, root: Path, *, force: bool = False) -> Report:
     report = Report()
     for path in _paths(root.resolve()):
         report.total_files += 1
@@ -108,7 +108,7 @@ def ingest(db: sqlite3.Connection, root: Path) -> Report:
             if path.suffix.lower() == ".pdf":
                 raise SkipFile("unsupported_pdf")
             digest = _digest(path)
-            if database.is_current(db, path, digest):
+            if not force and database.is_current(db, path, digest):
                 with db:
                     database.clear_skip(db, path)
                 report.unchanged += 1
@@ -125,7 +125,7 @@ def ingest(db: sqlite3.Connection, root: Path) -> Report:
         except Exception as exc:
             report.failed[str(path)] = f"{type(exc).__name__}: {exc}"
             continue
-        if not database.save(db, path, digest, file_type, document):
+        if not database.save(db, path, digest, file_type, document, force=force):
             report.unchanged += 1
             continue
         report.parsed += 1

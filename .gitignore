@@ -5,6 +5,11 @@ dist/
 .venv/
 /pcf-source.txt
 /pcf-runtime/
+*.[xX][lL][sS][xX].json
+*.[dD][oO][cC][xX].json
+_parse_report.json
+feedback_report.json
+feedback_summary.md
 *.sqlite
 *.sqlite-*
 *.sqlite3

@@ -26,7 +26,7 @@ class Table:
 
 
 _FILE_LABEL = re.compile(
-    r"\bAttachment\s+(?:#[\w-]+\s*[:–-]?\s*)?([^/\\<>:\r\n]+?\."
+    r"\bAttachment(?:[ \t]*:[ \t]*|[ \t]+)(?:#[\w-]+[ \t]*[:–-]?[ \t]*)?([^/\\<>:\r\n]+?\."
     r"(?:pdf|xlsx?|docx?|pptx?|png|jpe?g|zip|dwg|txt))\b",
     re.IGNORECASE,
 )
@@ -110,7 +110,7 @@ def _excel_table(sheet: Worksheet, embeddings: dict[tuple[int, int], tuple[str, 
         )
         cells = rows.setdefault(origin[0], {})
         cell = cells.get(origin[1], Cell(origin=origin))
-        files = _filenames(cell.text) or tuple(dict.fromkeys(cell.attachments + embeddings.get((row, column), ())))
+        files = tuple(dict.fromkeys(cell.attachments + embeddings.get((row, column), ())))
         cells[origin[1]] = replace(cell, has_image=cell.has_image or (row, column) in images, attachments=files)
 
     for region in merged_ranges:
@@ -146,14 +146,13 @@ def read_word(path: Path) -> list[Table]:
             for column, cell in enumerate(row.cells, start=row.grid_cols_before):
                 if cell._tc not in read_cells:
                     text = cell.text.strip()
-                    files = _filenames(text)
-                    if not files:
-                        files = tuple(dict.fromkeys(
-                            PurePosixPath(relation.target_ref).name
-                            for node in cell._tc.xpath(".//*[local-name()='OLEObject']")
-                            if (relation := cell.part.rels.get(node.get(_REL_NS + "id"))) is not None
-                            and not relation.is_external
-                        ))
+                    embedded = tuple(
+                        PurePosixPath(relation.target_ref).name
+                        for node in cell._tc.xpath(".//*[local-name()='OLEObject']")
+                        if (relation := cell.part.rels.get(node.get(_REL_NS + "id"))) is not None
+                        and not relation.is_external
+                    )
+                    files = tuple(dict.fromkeys(_filenames(text) + embedded))
                     image = bool(cell._tc.xpath(".//w:drawing | .//w:pict"))
                     read_cells[cell._tc] = Cell(text, cell._tc, image, files)
                 cells[column] = read_cells[cell._tc]

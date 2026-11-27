@@ -2,6 +2,7 @@ from contextlib import closing, redirect_stdout
 from io import BytesIO, StringIO
 import json
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -15,10 +16,11 @@ from PIL import Image
 from pcf_parser import database
 from pcf_parser.cli import main
 from pcf_parser.ingest import ingest
-from pcf_parser.parser import parse_document
+from pcf_parser.parser import parse_document, search_text
 
 
 _HEADERS = ("No.", "Buyer’s Comments", "Builder's Reply", "Status")
+_SPLIT_HEADERS = ("No.", "BUYER'S COMMENTS", "", "BUILDER'S REPLY", "", "Initial", "Status")
 
 
 def _picture() -> BytesIO:
@@ -78,6 +80,45 @@ def _write_word(path: Path) -> None:
     document.save(path)
 
 
+def _write_split_excel(path: Path) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    for row in (
+        ["Hull No. 3395-3401"],
+        ["174,000 CBM LNG CARRIER"],
+        ["Plan No.: 6U-2853-303", "Plan Title: Pump arrangement"],
+        ["Approved", "", "Approved with comments", "✓"],
+        _SPLIT_HEADERS,
+        ["1-a", "1st", "Check pump capacity", "1st", "Capacity is 500 m3/h", "Alex", "Open"],
+        [None, "2nd", "Review diagram\nAttachment: sketch.pdf", "2nd", "Noted, thanks", None, "Closed"],
+    ):
+        sheet.append(row)
+    sheet.merge_cells("B5:C5")
+    sheet.merge_cells("D5:E5")
+    sheet.add_image(ExcelImage(_picture()), "C7")
+    workbook.save(path)
+    workbook.close()
+
+
+def _write_split_word(path: Path) -> None:
+    document = make_word()
+    table = document.add_table(rows=0, cols=7)
+    for row in (
+        ("Hull No. 3228/3229\n174,000 CBM LNG CARRIER", "Plan Title: Fan arrangement", "", "", "", "", ""),
+        ("Not approved", "X", "", "", "", "", ""),
+        _SPLIT_HEADERS,
+        ("1", "a)", "Verify fan speed", "a)", "Speed confirmed", "QELNG/DK", "Open"),
+        ("", "b)", "Check drawing", "b)", "", "", "Closed"),
+    ):
+        for cell, value in zip(table.add_row().cells, row):
+            cell.text = value
+    table.cell(2, 1).merge(table.cell(2, 2))
+    table.cell(2, 3).merge(table.cell(2, 4))
+    table.cell(3, 5).merge(table.cell(4, 5))
+    table.cell(4, 4).paragraphs[0].add_run().add_picture(_picture())
+    document.save(path)
+
+
 class ParserTest(unittest.TestCase):
     def setUp(self):
         temporary = TemporaryDirectory()
@@ -120,7 +161,7 @@ class ParserTest(unittest.TestCase):
         source = self.root / "source.xlsx"
         workbook = Workbook()
         workbook.active.append(_HEADERS)
-        workbook.active.append([1, "Review", "See attached"])
+        workbook.active.append([1, "Review", "See attached\nAttachment: plan.pdf"])
         workbook.save(source)
         workbook.close()
         office_rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -145,8 +186,160 @@ class ParserTest(unittest.TestCase):
             modified.writestr("xl/embeddings/oleObject1.bin", b"synthetic")
 
         turn = parse_document(self.xlsx).threads[0].turns[0]
-        self.assertEqual(turn.attachments, ("oleObject1.bin",))
-        self.assertEqual(turn.builder_reply, "See attached\n[FILE_ATTACHED: oleObject1.bin]")
+        self.assertEqual(turn.attachments, ("plan.pdf", "oleObject1.bin"))
+        self.assertIn("[FILE_ATTACHED: plan.pdf]", turn.builder_reply)
+        self.assertIn("[FILE_ATTACHED: oleObject1.bin]", turn.builder_reply)
+
+    def test_merge_ranges_with_separate_round_and_content_columns(self):
+        _write_split_excel(self.xlsx)
+        _write_split_word(self.docx)
+        for path, labels, initial in (
+            (self.xlsx, ["1st", "2nd"], "Alex"),
+            (self.docx, ["a)", "b)"], "QELNG/DK"),
+        ):
+            with self.subTest(path=path):
+                result = parse_document(path, include_preview=True)
+                thread, = result.threads
+                self.assertEqual(thread.reviewer_initial, initial)
+                self.assertEqual([turn.round_label for turn in thread.turns], labels)
+                self.assertEqual(thread.raw_status, "Closed")
+                self.assertNotEqual(thread.turns[0].buyer_comment, labels[0])
+                self.assertTrue(thread.turns[1].has_image)
+                cells = [cell for table in result.raw_preview for row in table["rows"] for cell in row["cells"]]
+                self.assertIn({"columns": [2, 3], "text": "BUYER'S COMMENTS", "has_image": False,
+                               "attachments": []}, cells)
+        excel_thread = parse_document(self.xlsx).threads[0]
+        self.assertEqual(excel_thread.turns[0].buyer_comment, "Check pump capacity")
+        self.assertEqual(excel_thread.turns[0].builder_reply, "Capacity is 500 m3/h")
+        self.assertEqual(excel_thread.turns[1].attachments, ("sketch.pdf",))
+        self.assertEqual(parse_document(self.docx).threads[0].turns[1].builder_reply, "[IMAGE_ATTACHED]")
+
+    def test_inline_hull_capacity_description_and_checked_approval(self):
+        _write_split_excel(self.xlsx)
+        _write_split_word(self.docx)
+        for path, hull, approval in (
+            (self.xlsx, "3395-3401", "Approved with comments"),
+            (self.docx, "3228/3229", "Not approved"),
+        ):
+            with self.subTest(path=path):
+                values = parse_document(path).metadata
+                self.assertEqual(values["hull_no"], hull)
+                self.assertEqual(values["ship_type"], "174,000 CBM LNG CARRIER")
+                self.assertEqual(values["approval_status"], approval)
+
+    def test_search_text_filters_only_standalone_admin_lines(self):
+        _write_split_excel(self.xlsx)
+        thread = parse_document(self.xlsx).threads[0]
+        text = ("Waiting for buyer's confirmation.\nCan Builder understand that the comment is closed?\n"
+                "Noted, thanks\nThank you. Confirmed / Agreed\nWaiting for confirmation of pump pressure.")
+        thread.turns[1].builder_reply = text
+        indexed = search_text(thread)
+        self.assertIn("Waiting for confirmation of pump pressure.", indexed)
+        for phrase in text.splitlines()[:-1]:
+            self.assertNotIn(phrase, indexed)
+        self.assertEqual(thread.turns[1].builder_reply, text)
+
+    def test_hyphen_search_and_separate_initial_columns(self):
+        _write_split_excel(self.xlsx)
+        with closing(database.connect(self.db_path)) as db:
+            ingest(db, self.root)
+            for query in ("6U-2853-303", "3395-3401", "1-a", '"6U-2853-303"'):
+                with self.subTest(query=query):
+                    found, = database.search(db, query, 5)
+                    self.assertEqual(found["reviewer_initial"], "Alex")
+                    self.assertEqual(found["initial_comment"], "Check pump capacity")
+                    self.assertEqual(found["plan_no"], "6U-2853-303")
+            self.assertEqual(database.search(db, 'pump:capacity', 5)[0]["comment_no"], "1-a")
+
+    def test_legacy_database_initial_is_preserved_until_force_ingest(self):
+        _write_split_excel(self.xlsx)
+        with closing(sqlite3.connect(self.db_path)) as old:
+            old.executescript(database._SCHEMA.replace("initial_comment TEXT,", "initial TEXT,")
+                              .replace("    reviewer_initial TEXT,\n", ""))
+            with old:
+                old.execute("INSERT INTO pcf_documents VALUES (1, ?, 'old', 'xlsx', NULL, NULL, 'Test',"
+                            " NULL, NULL, NULL, 'rule', CURRENT_TIMESTAMP)", (str(self.xlsx),))
+                old.execute("INSERT INTO pcf_threads (doc_id, comment_no, source, initial, search_text)"
+                            " VALUES (1, '1', 'PCF', 'Old initial', 'old initial')")
+                old.execute("INSERT INTO pcf_turns (thread_id, turn_order, has_image, attachments)"
+                            " VALUES (1, 1, 0, '[]')")
+        with closing(database.connect(self.db_path, create=False)) as old:
+            self.assertEqual(database.search(old, "old", 2)[0]["initial_comment"], "Old initial")
+        with closing(database.connect(self.db_path)) as db:
+            self.assertEqual(tuple(db.execute("SELECT initial_comment, reviewer_initial FROM pcf_threads").fetchone()),
+                             ("Old initial", None))
+            self.assertEqual(ingest(db, self.root).parsed, 1)
+            self.assertEqual(ingest(db, self.root).unchanged, 1)
+            self.assertEqual(ingest(db, self.root, force=True).parsed, 1)
+
+    def test_cli_parse_review_and_pipeline_with_mock_gateway(self):
+        _write_split_excel(self.xlsx)
+        nested = self.root / "sub"
+        nested.mkdir()
+        _write_split_word(nested / self.docx.name)
+        out = self.root / "work"
+        parsed = out / "parsed"
+        feedback = out / "feedback"
+        env = {
+            "MAILSEARCH_GATEWAY_URL": "https://review.example.test:8443/v1",
+            "MAILSEARCH_GATEWAY_API_KEY": "test-key",
+            "MAILSEARCH_GATEWAY_ANSWER_MODELS": " review-model,other-model",
+        }
+        result = {
+            "verdict": "WARN",
+            "metadata_issues": [],
+            "thread_issues": [{"pattern": "병합 매칭", "detail": "라운드 위치 근거를 다시 확인"}],
+            "parser_fix_suggestions": ["parser.py의 병합 범위 회귀 테스트 추가"],
+        }
+        fenced = "\x60\x60\x60json\n" + json.dumps(result, ensure_ascii=False) + "\n\x60\x60\x60"
+        response = json.dumps({"choices": [{"message": {"content": fenced}}]}).encode()
+        with (patch.dict("os.environ", env, clear=True),
+              patch("pcf_parser.llm.http.client.HTTPSConnection") as https,
+              redirect_stdout(StringIO())):
+            connection = https.return_value
+            connection.getresponse.return_value.status = 200
+            connection.getresponse.return_value.read.return_value = response
+            self.assertEqual(main(["parse", str(self.root), "--out", str(parsed)]), 0)
+            self.assertEqual(main(["parse", str(self.root), "--out", str(parsed)]), 0)
+            self.assertEqual(json.loads((parsed / "_parse_report.json").read_text(encoding="utf-8"))["unchanged"], 2)
+            self.assertEqual(main(["review", str(parsed), "--out", str(feedback)]), 0)
+            self.assertEqual(main(["pipeline", str(self.root), "--out", str(out), "--force"]), 0)
+            connection.request.assert_called()
+            request = connection.request.call_args
+            self.assertEqual(request.args, ("POST", "/v1/chat/completions"))
+            body = json.loads(request.kwargs["body"])
+            self.assertEqual((body["model"], body["temperature"], body["stream"]), ("review-model", 0, False))
+            prompt = json.loads(body["messages"][1]["content"])
+            self.assertEqual(set(prompt), {"metadata", "threads", "warnings", "raw_preview"})
+            self.assertTrue(prompt["raw_preview"])
+            self.assertEqual(connection.request.call_count, 4)
+        data = json.loads((parsed / "example.xlsx.json").read_text(encoding="utf-8"))
+        self.assertEqual((len(data["file_hash"]), data["file_type"]), (64, "xlsx"))
+        self.assertTrue(data["parsed_at"])
+        self.assertEqual(data["threads"][0]["reviewer_initial"], "Alex")
+        self.assertEqual(data["threads"][0]["turns"][0]["turn_order"], 1)
+        report = json.loads((feedback / "feedback_report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["counts"]["WARN"], 2)
+        summary = (feedback / "feedback_summary.md").read_text(encoding="utf-8")
+        self.assertIn("병합 매칭 (2개 파일)", summary)
+        self.assertIn("sub/example.docx.json", summary)
+        self.assertIn("parser.py의 병합 범위 회귀 테스트 추가", summary)
+
+    def test_pipeline_records_gateway_failure_and_keeps_unmapped_preview(self):
+        workbook = Workbook()
+        workbook.active.append(["Unrecognized", "Comments"])
+        workbook.save(self.xlsx)
+        workbook.close()
+        output = self.root / "work"
+        with patch.dict("os.environ", {}, clear=True), redirect_stdout(StringIO()):
+            self.assertEqual(main(["pipeline", str(self.root), "--out", str(output)]), 1)
+        parsed = json.loads((output / "parsed" / "example.xlsx.json").read_text(encoding="utf-8"))
+        self.assertEqual(parsed["threads"], [])
+        self.assertTrue(parsed["raw_preview"])
+        self.assertTrue(parsed["warnings"])
+        summary = (output / "feedback" / "feedback_summary.md").read_text(encoding="utf-8")
+        self.assertIn("검토 실행 오류", summary)
+        self.assertIn("PCF_LLM_URL", summary)
 
     def test_number_and_metadata_fallback_without_guessing(self):
         path = self.root / "Hull_No_H104_Plan_No_D-002.xlsx"
