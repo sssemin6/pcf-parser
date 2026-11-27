@@ -11,6 +11,12 @@ from .ingest import ingest
 from .review import review_folder
 
 
+def run_pipeline(root: Path, output: Path, *, force: bool = False) -> tuple[dict, int]:
+    parsed = parse_folder(root, output / "parsed", force=force)
+    reviewed = review_folder(output / "parsed", output / "feedback")
+    return {"parse": parsed, "review": reviewed["counts"]}, int(bool(parsed["failed"] or reviewed["counts"]["ERROR"]))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = ArgumentParser(description="Parse and search Office comment threads")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -43,10 +49,7 @@ def main(argv: list[str] | None = None) -> int:
                 report = review_folder(args.root, args.out)
                 failed = report["counts"]["ERROR"] != 0
             else:
-                parsed = parse_folder(args.root, args.out / "parsed", force=args.force)
-                reviewed = review_folder(args.out / "parsed", args.out / "feedback")
-                report = {"parse": parsed, "review": reviewed["counts"]}
-                failed = bool(parsed["failed"] or reviewed["counts"]["ERROR"])
+                report, failed = run_pipeline(args.root, args.out, force=args.force)
         except (OSError, ValueError) as exc:
             parser.exit(1, f"pcf-parser: {exc}\n")
         print(json.dumps(report, indent=2, ensure_ascii=False))

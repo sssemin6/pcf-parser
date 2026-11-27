@@ -1,7 +1,8 @@
-from contextlib import closing, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO
 import json
 from pathlib import Path
+import runpy
 import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
@@ -340,6 +341,76 @@ class ParserTest(unittest.TestCase):
         summary = (output / "feedback" / "feedback_summary.md").read_text(encoding="utf-8")
         self.assertIn("검토 실행 오류", summary)
         self.assertIn("PCF_LLM_URL", summary)
+
+    def test_windows_launcher_runs_same_folder_pipeline_without_input(self):
+        launcher = self.root / "pcf-windows.py"
+        launcher.write_bytes(Path(__file__).resolve().parents[1].joinpath("pcf-windows.py").read_bytes())
+        source = self.root / "원본 문서 (공유)"
+        source.mkdir()
+        _write_split_excel(source / "sample.xlsx")
+        launcher.with_name("pcf-source.txt").write_text(str(source) + "\n", encoding="utf-8-sig")
+        output = StringIO()
+
+        with (patch("sys.argv", [str(launcher)]),
+              patch("builtins.input", side_effect=AssertionError("An input prompt was shown")) as ask,
+              patch("pcf_parser.review.GatewayClient.from_env") as gateway,
+              redirect_stdout(output), self.assertRaises(SystemExit) as exited):
+            gateway.return_value.model = "offline-test"
+            gateway.return_value.complete.return_value = {
+                "verdict": "PASS", "metadata_issues": [], "thread_issues": [], "parser_fix_suggestions": [],
+            }
+            runpy.run_path(str(launcher), run_name="__main__")
+
+        self.assertEqual(exited.exception.code, 0)
+        ask.assert_not_called()
+        gateway.return_value.complete.assert_called_once()
+        self.assertTrue((source / "parsed" / "sample.xlsx.json").is_file())
+        self.assertTrue((source / "parsed" / "_parse_report.json").is_file())
+        feedback = source / "feedback"
+        report = json.loads((feedback / "feedback_report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["counts"]["PASS"], 1)
+        self.assertTrue((feedback / "feedback_summary.md").is_file())
+        self.assertIn(str(feedback / "feedback_summary.md"), output.getvalue())
+        self.assertIn("PASS 1건 · WARN 0건 · FAIL 0건 · 오류 0건", output.getvalue())
+
+    def test_windows_launcher_saves_initial_folder_and_reuses_it(self):
+        launcher = self.root / "pcf-windows.py"
+        launcher.write_bytes(Path(__file__).resolve().parents[1].joinpath("pcf-windows.py").read_bytes())
+        source = self.root / "초기 입력 폴더"
+        source.mkdir()
+        config = launcher.with_name("pcf-source.txt")
+        for empty_config in (False, True):
+            with self.subTest(empty_config=empty_config):
+                config.unlink(missing_ok=True)
+                if empty_config:
+                    config.write_text("\n", encoding="utf-8")
+                with (patch("sys.argv", [str(launcher)]),
+                      patch("builtins.input", return_value=f'"{source}"') as ask, redirect_stdout(StringIO())):
+                    with self.assertRaises(SystemExit) as first:
+                        runpy.run_path(str(launcher), run_name="__main__")
+                    self.assertEqual(first.exception.code, 0)
+                    ask.assert_called_once()
+                    self.assertEqual(config.read_text(encoding="utf-8"), f"{source}\n")
+                    ask.reset_mock(side_effect=True)
+                    ask.side_effect = AssertionError("The saved path should be reused")
+                    with self.assertRaises(SystemExit) as second:
+                        runpy.run_path(str(launcher), run_name="__main__")
+                    self.assertEqual(second.exception.code, 0)
+                    ask.assert_not_called()
+
+    def test_windows_launcher_does_not_prompt_when_saved_folder_is_unavailable(self):
+        launcher = self.root / "pcf-windows.py"
+        launcher.write_bytes(Path(__file__).resolve().parents[1].joinpath("pcf-windows.py").read_bytes())
+        config = launcher.with_name("pcf-source.txt")
+        config.write_text(str(self.root / "unavailable"), encoding="utf-8")
+        error = StringIO()
+        with (patch("sys.argv", [str(launcher)]),
+              patch("builtins.input", side_effect=AssertionError("The saved path must not prompt")) as ask,
+              redirect_stderr(error), self.assertRaises(SystemExit) as exited):
+            runpy.run_path(str(launcher), run_name="__main__")
+        ask.assert_not_called()
+        self.assertEqual(exited.exception.code, 1)
+        self.assertIn("입력 폴더에 접근할 수 없습니다", error.getvalue())
 
     def test_number_and_metadata_fallback_without_guessing(self):
         path = self.root / "Hull_No_H104_Plan_No_D-002.xlsx"

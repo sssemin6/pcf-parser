@@ -8,9 +8,46 @@ import sys
 
 def read_source(config: Path) -> str:
     try:
-        return config.read_text(encoding="utf-8-sig").strip().strip('"')
+        return config.read_text(encoding="utf-8-sig").strip().strip('"').strip()
     except FileNotFoundError:
         return ""
+
+
+def run_automatic() -> int:
+    from pcf_parser.cli import run_pipeline
+    from pcf_parser.extraction import write_text
+
+    config = Path(__file__).with_name("pcf-source.txt")
+    location = read_source(config)
+    first_run = not location
+    if first_run:
+        try:
+            location = input("최초 설정: PCF 원본 문서 폴더 경로를 입력하세요: ").strip().strip('"').strip()
+        except EOFError:
+            location = ""
+        if not location:
+            print("입력 폴더를 지정하거나 pcf-source.txt에 경로를 저장하세요.", file=sys.stderr)
+            return 1
+    source = Path(location).expanduser().absolute()
+    if not source.is_dir():
+        print(f"입력 폴더에 접근할 수 없습니다: {source}", file=sys.stderr)
+        return 1
+    if first_run:
+        write_text(config, f"{source}\n")
+
+    print(f"PCF 파싱 및 LLM 검토 중: {source}", flush=True)
+    report, exit_code = run_pipeline(source, source)
+    parsed = report["parse"]
+    counts = report["review"]
+    parse_errors = len(parsed["failed"])
+    review_errors = counts["ERROR"]
+    print(f"\nJSON 저장: {source / 'parsed'}")
+    print(f"검토 리포트: {source / 'feedback' / 'feedback_report.json'}")
+    print(f"검토 요약: {source / 'feedback' / 'feedback_summary.md'}")
+    print(f"파싱 {parsed['parsed']}건 · 재사용 {parsed['unchanged']}건 · 건너뜀 {len(parsed['skipped'])}건")
+    print(f"PASS {counts['PASS']}건 · WARN {counts['WARN']}건 · FAIL {counts['FAIL']}건 · "
+          f"오류 {parse_errors + review_errors}건 (파싱 {parse_errors}건, 검토 {review_errors}건)")
+    return exit_code
 
 
 def run_menu(pcf_main) -> int:
@@ -80,7 +117,8 @@ def main() -> int:
         print('From the PCF Parser folder, run: py -3 -m pip install .', file=sys.stderr)
         return 1
 
-    if sys.argv[1:] == ["--self-test"]:
+    args = sys.argv[1:]
+    if args == ["--self-test"]:
         from docx import Document
         from openpyxl import Workbook
         from PIL import Image
@@ -95,10 +133,10 @@ def main() -> int:
             connection.close()
         print("PCF Parser runtime OK")
         return 0
-    if len(sys.argv) > 1:
-        return pcf_main(sys.argv[1:])
+    if args and args != ["--menu"]:
+        return pcf_main(args)
     try:
-        return run_menu(pcf_main)
+        return run_menu(pcf_main) if args else run_automatic()
     except (EOFError, KeyboardInterrupt):
         print()
         return 0

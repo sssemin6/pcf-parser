@@ -8,7 +8,11 @@ Plan Comments Form의 Excel·Word 파일을 읽어 문서 → 코멘트 스레�
 
 Windows용 ZIP은 압축을 푼 폴더에서 `run-pcf.cmd`를 더블클릭하면 실행됩니다. GitHub 소스에서 실행하는 경우에는 Python 3.10 이상을 설치하고 프로젝트 폴더에서 `py -3 -m pip install .`을 한 번 실행하세요.
 
-`run-pcf.cmd` 옆에 `pcf-source.txt`를 만들고 PCF 입력 폴더의 경로를 UTF-8로 한 줄에 적으면 기본 경로로 사용합니다. 로컬 경로와 `\\server\share\folder` 형식의 UNC 경로를 지원합니다. 실행 후 1번은 적재, 2번은 검색, 3번은 입력 폴더 변경입니다. 검색 DB는 `%LOCALAPPDATA%\PCF Parser\pcf.sqlite3`에 저장됩니다. PowerShell에서 `.\run-pcf.cmd --self-test`로 런타임을 점검할 수 있습니다.
+`pcf-source.txt`가 없거나 비어 있으면 최초 실행 때 한 번만 PCF 입력 폴더를 묻고, 입력한 경로를 실행 파일 옆에 UTF-8로 저장합니다. 이미 설정된 경우에는 바로 실행됩니다. 로컬 경로와 `\\server\share\folder` 형식의 UNC 경로를 지원하며, 기본 경로를 바꾸려면 `pcf-source.txt`를 수정하세요.
+
+이후 `run-pcf.cmd`를 더블클릭하면 저장된 폴더에서 JSON 추출과 LLM 검토를 시작합니다. 결과는 원본 폴더의 `parsed/`와 `feedback/`에 저장됩니다. 실행 전에 아래의 LLM 게이트웨이 환경변수를 설정하고 원본 폴더 쓰기 권한을 확인하세요. 완료되면 저장 위치와 PASS·WARN·FAIL·오류 건수를 보여주고, 키를 누르면 창이 닫힙니다.
+
+검색이나 수동 작업은 `run-pcf.cmd --menu`에서 실행합니다. 검색 DB는 `%LOCALAPPDATA%\PCF Parser\pcf.sqlite3`에 저장됩니다. PowerShell에서 `.\run-pcf.cmd --self-test`로 런타임을 점검할 수 있습니다.
 
 ### 명령줄에서 실행
 
@@ -36,7 +40,7 @@ python -m unittest discover -s tests -v
 .\run-pcf.cmd pipeline "C:\PCF" --out "$env:LOCALAPPDATA\PCF Parser\review"
 ```
 
-`pcf-parser` 명령으로도 같은 하위 명령을 실행할 수 있습니다. 대화형 메뉴에서는 **4번**을 사용합니다.
+`pcf-parser` 명령으로도 같은 하위 명령을 실행할 수 있습니다. 작업 폴더를 지정하거나 강제로 다시 파싱하려면 `pipeline` 하위 명령 또는 `run-pcf.cmd --menu`의 **4번**을 사용하세요.
 
 - `parse`는 `.xlsx`와 `.docx`를 하위 폴더까지 읽어 `이름.xlsx.json`처럼 파일별로 저장합니다. SHA-256이 같은 파일은 재사용하고, `--force`는 강제로 다시 파싱합니다. `_parse_report.json`에 이번 실행에 포함된 파일과 오류를 기록합니다.
 - `review`는 추출한 메타데이터, 스레드, 경고, 길이가 제한된 원본 표 미리보기를 설정된 LLM 게이트웨이에 전송합니다. `feedback_report.json`에는 파일별 판정과 오류, `feedback_summary.md`에는 FAIL/WARN 파일, 공통 패턴, 수정 제안을 저장합니다.

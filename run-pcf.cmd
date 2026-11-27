@@ -26,5 +26,5 @@ python.exe -B "%~dp0pcf-windows.py" %*
 set "pcf_exit=%ERRORLEVEL%"
 
 :finish
-if not "%pcf_exit%"=="0" if "%~1"=="" pause
+if "%~1"=="" pause
 exit /b %pcf_exit%
